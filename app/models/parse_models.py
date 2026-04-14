@@ -11,6 +11,15 @@ class ColumnMapping(BaseModel):
     match_method: str       # "exact", "fuzzy", "arabic_transliterated", "arabic_alias"
 
 
+# ─── Derivable field descriptor ───────────────────────────────────────────────
+
+class DerivableField(BaseModel):
+    field: str              # ML schema field name (e.g. "revenue")
+    formula: str            # human-readable formula (e.g. "price × quantity")
+    requires: list[str]     # which mapped fields are needed (e.g. ["price", "quantity"])
+    source_columns: list[str]  # original column names that supply those fields
+
+
 # ─── Full parse response ──────────────────────────────────────────────────────
 
 class ParseResponse(BaseModel):
@@ -25,7 +34,11 @@ class ParseResponse(BaseModel):
     # ML required columns coverage
     ml_required: list[str]                       # full list of required fields
     ml_missing: list[str]                        # required fields not found in file
-    ml_coverage_pct: float                       # 0–100
+    ml_coverage_pct: float                       # 0–100 (after derivation)
+
+    # Fields that can be calculated from what was mapped
+    derivable_fields: list[DerivableField]       # missing fields derivable at clean phase
+    truly_missing: list[str]                     # missing AND cannot be derived
 
     # Attribute columns (clothing-specific → orderItem.attributes jsonb)
     attribute_columns: dict[str, str]            # original_col → attribute key (e.g. "size", "color")
