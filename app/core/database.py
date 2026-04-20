@@ -185,20 +185,32 @@ def store_entities(
                             _s(o.get("createdAt")),  # None → Postgres uses defaultNow()
                         ))
 
-                    # Batch insert orders
-                    for i in range(0, len(order_rows), BATCH):
+                    # Batch insert orders — split by whether created_at is known.
+                    # Never pass explicit NULL for a NOT NULL column even with a default.
+                    rows_with_date    = [r for r in order_rows if r[8] is not None]
+                    rows_without_date = [r for r in order_rows if r[8] is None]
+
+                    for i in range(0, len(rows_with_date), BATCH):
                         psycopg2.extras.execute_values(
                             cur,
                             """INSERT INTO "order"
                                (id, business_id, customer_id, total, status,
-                                order_voucher, order_discount, address,
-                                created_at)
+                                order_voucher, order_discount, address, created_at)
                                VALUES %s ON CONFLICT DO NOTHING""",
-                            [
-                                (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-                                 r[8])  # None is fine — column has defaultNow()
-                                for r in order_rows[i:i + BATCH]
-                            ],
+                            [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8])
+                             for r in rows_with_date[i:i + BATCH]],
+                        )
+                        stats["orders_inserted"] += cur.rowcount
+
+                    for i in range(0, len(rows_without_date), BATCH):
+                        psycopg2.extras.execute_values(
+                            cur,
+                            """INSERT INTO "order"
+                               (id, business_id, customer_id, total, status,
+                                order_voucher, order_discount, address)
+                               VALUES %s ON CONFLICT DO NOTHING""",
+                            [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+                             for r in rows_without_date[i:i + BATCH]],
                         )
                         stats["orders_inserted"] += cur.rowcount
 
