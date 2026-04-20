@@ -2,63 +2,54 @@
 routers/parse.py
 
 POST /parse
-  - Accepts: multipart/form-data with a single file field named "file"
-  - Supports: .csv, .xlsx, .xls
-  - Returns: ParseResponse (mapping + confidence + sample — NO data transformation)
+  Accepts: JSON body { file_id: str }
+  Downloads the file from Supabase Storage using the file_id.
+  Returns: ParseResponse (mapping + confidence + sample)
 """
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
+from app.core.storage import download_file
 from app.models.parse_models import ParseResponse
 from app.services.parser import parse_file
 
 router = APIRouter(prefix="/parse", tags=["Parse"])
 
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
-MAX_FILE_SIZE_MB = 50
+
+class ParseRequest(BaseModel):
+    file_id: str
 
 
 @router.post(
     "",
     response_model=ParseResponse,
-    summary="Upload a CSV or Excel file and get column mapping + preview",
+    summary="Parse a file stored in Supabase Storage",
     response_description=(
         "Detected column mapping with confidence scores, "
-        "ML coverage report, clothing attribute columns, "
-        "unmapped columns, and a 5-row sample."
+        "ML coverage report, attribute columns, unmapped columns, "
+        "and a 5-row sample."
     ),
 )
-async def parse_upload(
-    file: UploadFile = File(..., description="CSV or Excel file (.csv / .xlsx / .xls)"),
-) -> ParseResponse:
-    # ── Validate filename ────────────────────────────────────────────────────
-    filename = file.filename or ""
-    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+async def parse_upload(body: ParseRequest) -> ParseResponse:
+    if not body.file_id:
+        raise HTTPException(status_code=400, detail="file_id is required.")
 
-    if ext not in ALLOWED_EXTENSIONS:
+    # ── Fetch file from Supabase Storage ─────────────────────────────────────
+    try:
+        file_bytes, filename = await download_file(body.file_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
         raise HTTPException(
-            status_code=415,
-            detail=(
-                f"Unsupported file type '{ext}'. "
-                f"Accepted formats: {', '.join(sorted(ALLOWED_EXTENSIONS))}."
-            ),
-        )
-
-    # ── Read bytes ───────────────────────────────────────────────────────────
-    file_bytes = await file.read()
-
-    # ── Size guard ───────────────────────────────────────────────────────────
-    size_mb = len(file_bytes) / (1024 * 1024)
-    if size_mb > MAX_FILE_SIZE_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large ({size_mb:.1f} MB). Maximum allowed: {MAX_FILE_SIZE_MB} MB.",
-        )
+            status_code=500,
+            detail=f"Failed to fetch file from storage: {str(exc)}",
+        ) from exc
 
     if len(file_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        raise HTTPException(status_code=400, detail="File in storage is empty.")
 
-    # ── Parse ────────────────────────────────────────────────────────────────
+    # ── Parse ─────────────────────────────────────────────────────────────────
     try:
         result = await parse_file(file_bytes, filename)
     except ValueError as exc:

@@ -6,48 +6,57 @@ from typing import Any
 
 class ColumnMapping(BaseModel):
     original_column: str
-    mapped_to: str          # schema field name, "__attributes__", or "__unmapped__"
-    confidence: float       # fuzzy score 0–100
-    match_method: str       # "exact", "fuzzy", "arabic_transliterated", "arabic_alias"
+    mapped_to:       str          # target key, "__attributes__.key", or "__unmapped__"
+    confidence:      float        # 0–100
+    match_method:    str          # "exact" | "fuzzy" | "data_signal" | "unmatched"
+    human_label:     str          # plain-language label shown to the user
+    group:           str          # "Customer" | "Product" | "Order" | "Notes"
+    sample_values:   list[str] = []  # up to 3 real values from the column
 
 
-# ─── Derivable field descriptor ───────────────────────────────────────────────
+# ─── Derivable field descriptor ──────────────────────────────────────────────
 
 class DerivableField(BaseModel):
-    field: str              # ML schema field name (e.g. "revenue")
-    formula: str            # human-readable formula (e.g. "price × quantity")
-    requires: list[str]     # which mapped fields are needed (e.g. ["price", "quantity"])
-    source_columns: list[str]  # original column names that supply those fields
+    field:          str          # ML field name (e.g. "revenue")
+    formula:        str          # human formula (e.g. "price × quantity")
+    requires:       list[str]    # required ML fields
+    source_columns: list[str]    # original column names that supply them
 
 
 # ─── Full parse response ──────────────────────────────────────────────────────
 
 class ParseResponse(BaseModel):
-    # Header
-    header_row_index: int                        # 0-based row index where header was detected
+    # Header detection
+    header_row_index: int
 
-    # Mapping results
-    detected_mapping: dict[str, str]             # original_col → schema_field
-    confidence_scores: dict[str, float]          # original_col → score
-    match_methods: dict[str, str]                # original_col → method
+    # Core mapping results
+    detected_mapping:  dict[str, str]    # original_col → target
+    confidence_scores: dict[str, float]  # original_col → score 0–100
+    match_methods:     dict[str, str]    # original_col → method
 
-    # ML required columns coverage
-    ml_required: list[str]                       # full list of required fields
-    ml_missing: list[str]                        # required fields not found in file
-    ml_coverage_pct: float                       # 0–100 (after derivation)
+    # Human-readable labels and grouping (for the mapping UI)
+    human_labels: dict[str, str]         # original_col → plain-language label
+    groups:       dict[str, str]         # original_col → group name
+    sample_values: dict[str, list[str]]  # original_col → up to 3 sample values
 
-    # Fields that can be calculated from what was mapped
-    derivable_fields: list[DerivableField]       # missing fields derivable at clean phase
-    truly_missing: list[str]                     # missing AND cannot be derived
+    # ML coverage
+    ml_required:     list[str]           # all required ML fields
+    ml_missing:      list[str]           # required but not found
+    ml_coverage_pct: float               # 0–100
 
-    # Attribute columns (clothing-specific → orderItem.attributes jsonb)
-    attribute_columns: dict[str, str]            # original_col → attribute key (e.g. "size", "color")
+    # Derivation engine
+    derivable_fields: list[DerivableField]  # missing but calculable at clean time
+    truly_missing:    list[str]             # missing AND cannot be derived
 
-    # Unmapped
-    unmapped_columns: list[str]                  # columns that couldn't be mapped
+    # Clothing attributes (→ orderItem.attributes jsonb)
+    attribute_columns: dict[str, str]    # original_col → attribute key (e.g. "size")
 
-    # Preview
-    sample_rows: list[dict[str, Any]]            # 5 raw rows (from detected header onward)
+    # Columns that go to metadata
+    unmapped_columns: list[str]
 
-    # Warnings
-    warnings: list[str]                          # e.g. "Arabic columns detected", "cost missing"
+    # File stats
+    total_rows:    int
+    total_columns: int
+
+    # Warnings (shown in UI)
+    warnings: list[str]
