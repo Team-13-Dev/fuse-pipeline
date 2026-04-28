@@ -342,3 +342,12 @@ def store_entities(
         _log(f"FAILED — {type(exc).__name__}: {exc}")
         traceback.print_exc(file=sys.stderr)
         raise
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Connection helper for other modules (segmentation, future ML jobs)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_db_connection():
+    """Public wrapper around _connect() so other modules can borrow connections."""
+    return _connect()

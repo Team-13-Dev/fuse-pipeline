@@ -11,6 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers.parse import router as parse_router
 from app.routers.clean import router as clean_router
 
+from app.routers.segment_product import router as segment_product_router
+from app.routers.jobs            import router as jobs_router
+
 app = FastAPI(
     title="FUSE Data Pipeline",
     description=(
@@ -33,6 +36,9 @@ app.add_middleware(
 # ─── Routers ──────────────────────────────────────────────────────────────────
 app.include_router(parse_router)
 app.include_router(clean_router)
+
+app.include_router(segment_product_router)
+app.include_router(jobs_router)
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["Health"])
