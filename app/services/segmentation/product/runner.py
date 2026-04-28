@@ -45,13 +45,13 @@ def _load_product_dataframe(business_id: str) -> pd.DataFrame:
     """
     sql = """
     SELECT
-        p.id::text         AS product_id,
-        p.price::numeric   AS price,
-        COALESCE(p.cost,0)::numeric AS cost,
-        COALESCE(p.stock,0)::numeric AS stock,
-        COALESCE(SUM(oi.quantity), 0)::numeric AS quantity,
-        COALESCE(SUM(oi.quantity * oi.unit_price), 0)::numeric AS revenue,
-        COALESCE(SUM(oi.quantity * (oi.unit_price - COALESCE(p.cost, 0))), 0)::numeric AS profit
+        p.id::text       AS product_id,
+        p.price::numeric AS price,
+        COALESCE(NULLIF(p.cost::numeric, 0), p.price::numeric * 0.5) AS cost,
+        GREATEST(COALESCE(p.stock, 0), 1)::numeric AS stock,
+        COALESCE(SUM(oi.quantity), 0)::numeric                                                AS quantity,
+        COALESCE(SUM(oi.quantity * oi.unit_price), 0)::numeric                                AS revenue,
+        COALESCE(SUM(oi.quantity * (oi.unit_price - COALESCE(NULLIF(p.cost::numeric, 0), p.price::numeric * 0.5))), 0)::numeric AS profit
     FROM product p
     LEFT JOIN order_item oi ON oi.product_id = p.id
     WHERE p.business_id = %s

@@ -62,12 +62,24 @@ def _validate(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Derive clustering features. We fill NaNs rather than drop rows because
+    local brands often have sparse data — we'd rather cluster all products
+    with sensible defaults than refuse to cluster anything.
+    """
     df = df[df["cost"] >= 0].reset_index(drop=True)
+
     df["absolute_margin"] = df["price"] - df["cost"]
     df["stock_turnover"]  = df["quantity"] / df["stock"].replace(0, np.nan)
 
     cluster_features = ["profit_margin", "absolute_margin", "stock_turnover", "quantity"]
-    df = df.dropna(subset=cluster_features).reset_index(drop=True)
+
+    # Fill any remaining NaNs with column medians (or 0 if a column is all NaN).
+    for col in cluster_features:
+        if df[col].isna().all():
+            df[col] = 0.0
+        else:
+            df[col] = df[col].fillna(df[col].median())
 
     if len(df) < MIN_PRODUCTS_FOR_SEGMENTATION:
         raise InsufficientDataError(

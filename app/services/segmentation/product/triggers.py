@@ -6,8 +6,7 @@ Product segmentation trigger — decides whether a re-run is warranted.
 Thresholds are tuned for local brands (5–200 products typical):
   - hard gate: minimum 15 products
   - 50 new order_items since last run
-  - 5 products added since last run
-  - 5 products with price/cost/stock changed since last run
+  - 5 products added OR edited (price/cost/stock) since last run
   - 7-day drift safety net
 """
 from __future__ import annotations
@@ -95,27 +94,27 @@ class ProductSegmentationTrigger(SegmentationTrigger):
                         detail=f"{new_items} new sales since last run.",
                     )
 
-                # ── Product changes (added or edited) ─────────────────────
-                # We don't have an updated_at column on product currently —
-                # compare against created_at as a proxy for "newly added".
-                # For edits, see note below.
+                # ── Product changes (added OR edited) ─────────────────────
                 cur.execute(
                     """SELECT COUNT(*) FROM product
-                       WHERE business_id = %s AND created_at > %s""",
+                       WHERE business_id = %s AND updated_at > %s""",
                     (business_id, last_run),
                 )
-                new_products = cur.fetchone()[0] or 0
-                if new_products >= PRODUCT_CHANGES_THRESHOLD:
+                product_changes = cur.fetchone()[0] or 0
+                if product_changes >= PRODUCT_CHANGES_THRESHOLD:
                     return TriggerDecision(
                         should_run=True,
                         reason="product_changes",
-                        detail=f"{new_products} products added since last run.",
+                        detail=f"{product_changes} products added or edited since last run.",
                     )
 
                 return TriggerDecision(
                     should_run=False,
                     reason="no_threshold_met",
-                    detail=f"{new_items} new sales, {new_products} new products — below thresholds.",
+                    detail=(
+                        f"{new_items} new sales, "
+                        f"{product_changes} product changes — below thresholds."
+                    ),
                 )
         finally:
             conn.close()
