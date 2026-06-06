@@ -54,7 +54,8 @@ def _validate(df: pd.DataFrame) -> pd.DataFrame:
             f"Need at least {MIN_PRODUCTS_FOR_SEGMENTATION} products for segmentation, got {len(df)}"
         )
 
-    return df[REQUIRED_COLUMNS].copy()
+    extra_cols = [c for c in ["product_name"] if c in df.columns]
+    return df[REQUIRED_COLUMNS + extra_cols].copy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,16 +71,10 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["cost"] >= 0].reset_index(drop=True)
 
     df["absolute_margin"] = df["price"] - df["cost"]
-    df["stock_turnover"]  = df["quantity"] / df["stock"].replace(0, np.nan)
+    df["stock_turnover"]  = (df["quantity"] / df["stock"].replace(0, np.nan)).fillna(0)
 
     cluster_features = ["profit_margin", "absolute_margin", "stock_turnover", "quantity"]
-
-    # Fill any remaining NaNs with column medians (or 0 if a column is all NaN).
-    for col in cluster_features:
-        if df[col].isna().all():
-            df[col] = 0.0
-        else:
-            df[col] = df[col].fillna(df[col].median())
+    df = df.dropna(subset=cluster_features).reset_index(drop=True)
 
     if len(df) < MIN_PRODUCTS_FOR_SEGMENTATION:
         raise InsufficientDataError(
@@ -95,7 +90,7 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _transform_and_scale(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     work = df.copy()
-    work["absolute_margin_log"] = np.log1p(work["absolute_margin"])
+    work["absolute_margin_log"] = np.log1p(work["absolute_margin"].clip(lower=-1 + 1e-6))
     work["quantity_log"]        = np.log1p(work["quantity"])
 
     cols_to_transform = [
@@ -111,7 +106,7 @@ def _transform_and_scale(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     scaler = RobustScaler()
     work[cols_to_transform] = scaler.fit_transform(work[cols_to_transform])
 
-    cluster_cols = ["profit_margin", "absolute_margin_log", "stock_turnover"]
+    cluster_cols = ["profit_margin", "absolute_margin_log", "stock_turnover", "quantity_log"]
     df_cluster   = work[cluster_cols].copy()
     return df_cluster, work
 
@@ -121,8 +116,9 @@ def _transform_and_scale(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _find_best_model(df_cluster: pd.DataFrame):
-    # Cap k at min(10, n-1) — can't have more clusters than samples
-    max_k = min(10, len(df_cluster) - 1)
+    # Cap k so clusters stay meaningful: at most 6, and never more than n/5
+    # (keeps average cluster size >= 5 products).
+    max_k = min(6, len(df_cluster) // 5, len(df_cluster) - 1)
     k_values = range(2, max_k + 1)
 
     best_score, best_model, best_labels, best_k, model_name = -1, None, None, 2, ""
@@ -131,7 +127,9 @@ def _find_best_model(df_cluster: pd.DataFrame):
         km = KMeans(n_clusters=k, random_state=42, n_init=10)
         km_labels = km.fit_predict(df_cluster)
         if len(set(km_labels)) > 1:
-            km_score = silhouette_score(df_cluster, km_labels)
+            min_cluster_size = max(2, len(df_cluster) // 10)
+            if min(np.bincount(km_labels)) >= min_cluster_size:
+                km_score = silhouette_score(df_cluster, km_labels)
             if km_score > best_score:
                 best_score, best_model, best_labels, best_k, model_name = (
                     km_score, km, km_labels, k, "KMeans"
@@ -157,38 +155,51 @@ def _find_best_model(df_cluster: pd.DataFrame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _name_clusters(model, model_name: str, best_k: int) -> dict[int, str]:
-    features = ["profit_margin", "absolute_margin_log", "stock_turnover"]
+    all_features = ["profit_margin", "absolute_margin_log", "stock_turnover", "quantity_log"]
     if model_name == "KMeans":
-        centers = pd.DataFrame(model.cluster_centers_, columns=features)
+        centers = pd.DataFrame(model.cluster_centers_, columns=all_features)
     else:
-        centers = pd.DataFrame(model.means_, columns=features)
-    ranks = centers.rank().astype(int)
+        centers = pd.DataFrame(model.means_, columns=all_features)
+
+    # Use all 4 features for naming — quantity is the strongest differentiator
+    # in single-category stores where margins are all similar.
+    ranks = centers.rank(method="first").astype(int)
 
     names: dict[int, str] = {}
     for i in range(best_k):
-        margin_rank   = ranks.loc[i, "profit_margin"]
         absolute_rank = ranks.loc[i, "absolute_margin_log"]
         turnover_rank = ranks.loc[i, "stock_turnover"]
+        quantity_rank = ranks.loc[i, "quantity_log"]
+        margin_rank   = ranks.loc[i, "profit_margin"]
 
-        high_margin   = margin_rank   >= best_k * 0.6
-        high_absolute = absolute_rank >= best_k * 0.6
-        high_turnover = turnover_rank >= best_k * 0.6
-        low_margin    = margin_rank   <= best_k * 0.4
-        low_turnover  = turnover_rank <= best_k * 0.4
+        hi = best_k * 0.6
+        lo = best_k * 0.4
 
-        if   high_margin and high_absolute and high_turnover:     name = "Premium Stars"
-        elif high_margin and high_absolute and not high_turnover: name = "High Margin, Slow Movers"
-        elif high_turnover and low_margin:                        name = "Low Margin, High Velocity"
-        elif low_margin   and low_turnover:                       name = "Underperformers"
-        elif high_turnover and not low_margin:                    name = "Fast Movers"
-        else:                                                     name = "Balanced Performance"
+        high_absolute = absolute_rank >= hi
+        high_turnover = turnover_rank >= hi
+        high_quantity = quantity_rank >= hi
+        low_absolute  = absolute_rank <= lo
+        low_turnover  = turnover_rank <= lo
+        low_quantity  = quantity_rank <= lo
+        low_margin    = margin_rank   <= lo
+
+        if   high_absolute and high_turnover and high_quantity:  name = "Premium Stars"
+        elif high_absolute and low_turnover  and low_quantity:   name = "High Margin, Slow Movers"
+        elif low_absolute  and high_quantity:                    name = "High Volume, Thin Margin"
+        elif low_turnover  and low_quantity:                     name = "Underperformers"
+        elif high_turnover and high_quantity and not low_margin: name = "Fast Movers"
+        elif high_quantity and not high_turnover:                name = "Volume Sellers"
+        elif low_quantity  and not low_turnover:                 name = "Dormant Inventory"
+        elif high_absolute and not low_turnover:                 name = "Solid Performers"
+        else:                                                    name = "Mid-Tier"
         names[i] = name
 
+    # Safety-net deduplication — with 9 names and max k=6 this rarely fires.
     seen: dict[str, int] = {}
     for i, name in list(names.items()):
         if name in seen:
             seen[name] += 1
-            names[i] = f"{name} ({seen[name]})"
+            names[i] = f"{name} {seen[name]}"
         else:
             seen[name] = 1
     return names
@@ -243,14 +254,31 @@ def _build_result(
         cl_name = str(row["cluster_name"])
         in_cl   = df[df["cluster"] == cl_id]
 
-        top_n = in_cl.nlargest(5, "profit")[["product_id", "profit", "revenue"]]
-        top   = [{"product_id": str(r["product_id"]), "profit": float(r["profit"]),
-                  "revenue":    float(r["revenue"])}
+        scored = in_cl.copy()
+        scored["composite_score"] = scored["profit_margin"] * np.sign(scored["profit"]) * np.log1p(scored["profit"].abs())
+
+        id_cols = ["product_id", "composite_score", "price", "profit", "profit_margin"]
+        if "product_name" in scored.columns:
+            id_cols.insert(1, "product_name")
+
+        # Cap n so top and bottom lists never draw from the same products.
+        # floor(size/2) guarantees the two halves are disjoint.
+        n = min(5, len(in_cl) // 2)
+
+        top_n = scored.nlargest(n, "composite_score")[id_cols] if n > 0 else scored.iloc[0:0][id_cols]
+        top   = [{"product_id":    str(r["product_id"]),
+                  "product_name":  str(r["product_name"]) if pd.notna(r.get("product_name")) else None,
+                  "price":         float(r["price"]),
+                  "profit":        float(r["profit"]),
+                  "composite_score": round(float(r["composite_score"]), 4)}
                  for _, r in top_n.iterrows()]
 
-        bot_n = in_cl.nsmallest(5, "profit_margin")[["product_id", "profit_margin"]]
+        bot_n = scored.nsmallest(n, "composite_score")[id_cols] if n > 0 else scored.iloc[0:0][id_cols]
         bot   = [{"product_id":    str(r["product_id"]),
-                  "profit_margin": float(r["profit_margin"])}
+                  "product_name":  str(r["product_name"]) if pd.notna(r.get("product_name")) else None,
+                  "price":         float(r["price"]),
+                  "profit_margin": float(r["profit_margin"]),
+                  "composite_score": round(float(r["composite_score"]), 4)}
                  for _, r in bot_n.iterrows()]
 
         cluster_stats.append(ClusterStats(
@@ -301,4 +329,4 @@ def run_product_segmentation(df_raw: pd.DataFrame) -> SegmentationResult:
     _log(f"best model: {model_name}, k={best_k}, silhouette={silhouette}")
 
     cluster_names = _name_clusters(model, model_name, best_k)
-    return _build_result(df_enriched, labels, cluster_names, model_name, best_k, silhouette)
+    return _build_result(df, labels, cluster_names, model_name, best_k, silhouette)
